@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SEO Agent — Audit &amp; fix</title>
+  <style>
+    :root { color-scheme: light dark; }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; max-width: 100%; width: 100%; overflow-x: auto; }
+    body { font-family: system-ui, sans-serif; padding: 1rem 1.25rem 2rem; line-height: 1.45; }
+    h1 { font-size: 1.35rem; margin-top: 0; }
+    h2 { font-size: 1.1rem; margin-top: 1.75rem; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; }
+    section.panel { border: 1px solid #ccc; border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem; background: rgba(0,0,0,0.02); width: 100%; }
+    .field-grid { display: grid; gap: 0.75rem 1.25rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); align-items: end; margin-top: 0.75rem; }
+    label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
+    label span.hint { font-size: 0.75rem; opacity: 0.8; font-weight: normal; }
+    input[type="url"], input[type="text"], input[type="number"] { padding: 0.45rem 0.5rem; font-size: 1rem; width: 100%; max-width: 100%; }
+    button.primary { margin-top: 0.75rem; padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer; }
+    button.primary:disabled { opacity: 0.45; cursor: not-allowed; }
+    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
+    .card { border: 1px solid #ccc; border-radius: 8px; padding: 0.5rem 0.85rem; min-width: 100px; }
+    .alert { padding: 0.75rem 1rem; border-radius: 8px; margin-top: 0.75rem; }
+    .alert-error { background: #fee; border: 1px solid #c33; color: #511; }
+    .alert-ok { background: #efe; border: 1px solid #393; color: #131; }
+    .stack-line { font-size: 0.95rem; margin: 0.5rem 0; }
+    .audit-progress-wrap { margin-top: 0.75rem; width: 100%; }
+    .audit-progress-label { margin: 0 0 0.35rem; font-size: 0.9rem; color: #444; }
+    .progress-track { height: 10px; background: #ddd; border-radius: 5px; overflow: hidden; width: 100%; }
+    .progress-bar-indeterminate { height: 100%; width: 35%; background: #2563eb; border-radius: 5px; animation: progress-slide 1.4s ease-in-out infinite; }
+    @keyframes progress-slide {
+      0% { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+    table.issues { width: 100%; border-collapse: collapse; margin-top: 0.75rem; font-size: 0.88rem; table-layout: fixed; }
+    table.issues th, table.issues td { border: 1px solid #bbb; padding: 0.45rem 0.5rem; text-align: left; vertical-align: top; word-break: break-word; }
+    table.issues thead th { background: #e8e8e8; position: sticky; top: 0; z-index: 1; }
+    table.issues tbody tr:nth-child(even) { background: rgba(0,0,0,0.03); }
+    .issues-scroll { overflow: auto; max-height: min(70vh, 900px); width: 100%; }
+    .evidence-cell, .fix-cell { max-height: 5rem; overflow: auto; font-size: 0.82rem; }
+    pre.diff, pre.raw { background: #111; color: #eee; padding: 0.75rem; overflow: auto; max-height: 280px; font-size: 0.8rem; margin: 0.5rem 0; }
+    details.raw-json { margin-top: 1rem; }
+    .apply-extra { margin-top: 0.75rem; }
+    .activity-wrap { margin-top: 0.75rem; display: none; width: 100%; }
+    .activity-wrap h4 { margin: 0 0 0.35rem; font-size: 0.85rem; font-weight: 600; color: #333; }
+    .activity-log {
+      max-height: 10rem;
+      overflow: auto;
+      font-family: ui-monospace, monospace;
+      font-size: 0.78rem;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(0,0,0,0.06);
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 0.5rem 0.65rem;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>SEO Agent</h1>
+  <p>Step 1 runs a read-only audit. Step 2 clones a <strong>Git repository</strong> (HTTPS or <code>git@</code>), checks out the <code>test</code> branch (creates it if missing), applies fixes, runs <code>npm run build</code> when files change, then commits locally on <code>test</code> (no push). Open this page from the same host as the API (e.g. <code>/ui/</code>). Audits use <code>POST /analyze/async</code>; <code>POST /analyze</code> remains for scripts.</p>
+
+  <div id="globalError" class="alert alert-error" style="display:none;"></div>
+
+  <section class="panel" aria-labelledby="step1-h">
+    <h2 id="step1-h">Step 1: Audit website</h2>
+    <p>Enter the site URL and crawl limits. Large sites can take several minutes; a progress indicator runs while the audit request is in flight.</p>
+    <form id="formAudit">
+      <div class="field-grid">
+        <label>Website URL <span class="hint">Required — crawl starts here</span>
+          <input name="url" type="url" size="50" value="http://127.0.0.1:3000" required />
+        </label>
+        <label>Depth <span class="hint">Same-origin link depth (0 = start URL only)</span>
+          <input name="depth" type="number" value="1" min="0" max="10" required />
+        </label>
+        <label>Number of pages <span class="hint">Max pages to crawl &amp; audit (<code>max_pages</code>)</span>
+          <input name="max_pages" type="number" value="5" min="1" max="100" required />
+        </label>
+      </div>
+      <button type="submit" class="primary" id="btnAudit">Run SEO audit</button>
+      <div id="auditProgressWrap" class="audit-progress-wrap" style="display:none;" aria-live="polite">
+        <p class="audit-progress-label">Running audit… this may take a few minutes.</p>
+        <div class="progress-track" role="progressbar" aria-valuetext="Audit in progress">
+          <div class="progress-bar-indeterminate"></div>
+        </div>
+      </div>
+      <div id="auditActivityWrap" class="activity-wrap" aria-live="polite">
+        <h4>Activity</h4>
+        <pre id="auditActivityLog" class="activity-log"></pre>
+      </div>
+    </form>
+    <div id="auditSummary" class="row" style="display:none;"></div>
+    <div id="auditStack" class="stack-line" style="display:none;"></div>
+    <div id="auditTableWrap" style="display:none;">
+      <h3 style="font-size:1rem;margin-top:1rem;">Issues</h3>
+      <div class="issues-scroll">
+        <table class="issues" id="issuesTable">
+          <thead>
+            <tr>
+              <th>Severity</th>
+              <th>Rule</th>
+              <th>Page</th>
+              <th>Evidence</th>
+              <th>Suggested fix</th>
+              <th>SOP status</th>
+            </tr>
+          </thead>
+          <tbody id="issuesBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="step2-h">
+    <h2 id="step2-h">Step 2: Fix code from Git repository</h2>
+    <p>After a successful audit, enter the <strong>clone URL</strong> of the repo to patch. The API clones into <code>.clones/&lt;run-id&gt;</code>, checks out branch <code>test</code> (from <code>origin/test</code> if it exists, otherwise creates <code>test</code> from the default branch), runs <code>code_modify</code>, then <code>npm run build</code>. Set <code>SEO_AGENT_GIT_AUTO_PUSH=1</code> in <code>.env</code> to run <code>git push -u origin test</code> after a successful local commit (off by default). Requires <code>git</code> on the server PATH and push-capable credentials for the remote.</p>
+    <p class="hint" style="margin:0.5rem 0 0;font-size:0.88rem;"><strong>Auto-fix scope:</strong> Detects <code>src/app</code> vs <code>app</code>, optional <code>pages/</code> / <code>src/pages/</code>, maps URLs to route files, then patches <code>missing_meta</code> on the resolved <code>layout.tsx</code> / <code>layout.jsx</code>. <code>duplicate_h1</code> and <code>missing_alt</code> run on the route file plus a bounded import walk and evidence substring search (so shared components can be updated). <code>broken_link</code> gets a suggested source file when the link text appears in the tree; set <code>SEO_AGENT_FIX_BROKEN_LINKS=1</code> in <code>.env</code> for optional conservative internal <code>href</code> replacement (off by default).</p>
+    <form id="formApply">
+      <label>Repository URL (<code>repo_url</code>)
+        <input name="repo_url" type="text" size="60" placeholder="https://github.com/org/repo.git" autocomplete="off" />
+        <span class="hint" style="margin-top:0.35rem;">HTTPS, <code>ssh://</code>, or <code>git@host:path</code>. For legacy local folders only, use the API field <code>repo_root</code> with <code>SEO_AGENT_REPO_ALLOWLIST</code> instead (not exposed in this UI).</span>
+      </label>
+      <div class="apply-extra">
+        <label><input type="checkbox" name="dry_run" id="chkDryRun" /> <strong>Dry run</strong> — no file writes; the <code>code_modify</code> step is <strong>skipped</strong>. Leave <strong>unchecked</strong> to apply real fixes.</label>
+      </div>
+      <button type="submit" class="primary" id="btnApply" disabled>Apply fixes</button>
+      <div id="applyProgressWrap" class="audit-progress-wrap" style="display:none;" aria-live="polite">
+        <p class="audit-progress-label">Applying fixes… this may take a while.</p>
+        <div class="progress-track" role="progressbar" aria-valuetext="Apply in progress">
+          <div class="progress-bar-indeterminate"></div>
+        </div>
+      </div>
+      <div id="applyActivityWrap" class="activity-wrap" aria-live="polite">
+        <h4>Activity</h4>
+        <pre id="applyActivityLog" class="activity-log"></pre>
+      </div>
+    </form>
+    <div id="applyResult" style="display:none;"></div>
+  </section>
+
+  <details class="raw-json">
+    <summary>Show raw JSON (debug)</summary>
+    <pre class="raw" id="rawOut"></pre>
+  </details>
+
+  <script>
+    /** Same-origin when UI is served from the API host (any port). */
+    const api = () =>
+      typeof location !== "undefined" &&
+      location.protocol !== "file:" &&
+      (location.hostname === "127.0.0.1" || location.hostname === "localhost")
+        ? ""
+        : "http://127.0.0.1:8000";
+
+    /** @type {{ url: string, depth: number, max_pages: number } | null} */
+    let lastAuditRequest = null;
+    let lastAuditOk = false;
+
+    function esc(s) {
+      if (s == null || s === "") return "";
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function showGlobalError(msg) {
+      const el = document.getElementById("globalError");
+      el.textContent = msg;
+      el.style.display = msg ? "block" : "none";
+    }
+
+    function setApplyEnabled() {
+      const repoUrl = document.querySelector("#formApply input[name=repo_url]").value.trim();
+      document.getElementById("btnApply").disabled = !lastAuditOk || !lastAuditRequest || !repoUrl;
+    }
+
+    document.querySelector("#formApply input[name=repo_url]").addEventListener("input", setApplyEnabled);
+
+    function clearAuditResults() {
+      document.getElementById("auditSummary").innerHTML = "";
+      document.getElementById("auditSummary").style.display = "none";
+      document.getElementById("auditStack").innerHTML = "";
+      document.getElementById("auditStack").style.display = "none";
+      document.getElementById("issuesBody").innerHTML = "";
+      document.getElementById("auditTableWrap").style.display = "none";
+      document.getElementById("rawOut").textContent = "";
+      document.getElementById("auditActivityLog").textContent = "";
+      document.getElementById("auditActivityWrap").style.display = "none";
+    }
+
+    function setAuditLoading(on) {
+      document.getElementById("auditProgressWrap").style.display = on ? "block" : "none";
+      document.getElementById("btnAudit").disabled = on;
+    }
+
+    function setApplyLoading(on) {
+      const repoUrl = document.querySelector("#formApply input[name=repo_url]").value.trim();
+      document.getElementById("applyProgressWrap").style.display = on ? "block" : "none";
+      document.getElementById("btnApply").disabled = on || !lastAuditOk || !lastAuditRequest || !repoUrl;
+    }
+
+    function sopMapFromResults(results) {
+      const m = new Map();
+      const sop = results.sop || [];
+      for (const row of sop) {
+        const id = row.issue_id;
+        if (id) m.set(id, row);
+      }
+      return m;
+    }
+
+    function renderAuditTable(results) {
+      const issues = results.issues || [];
+      const smap = sopMapFromResults(results);
+      const tbody = document.getElementById("issuesBody");
+      tbody.innerHTML = issues
+        .map((i) => {
+          const sop = smap.get(i.issue_id) || {};
+          const st = sop.sop_status != null ? esc(sop.sop_status) : "—";
+          const ev = esc(i.evidence || "");
+          const evTitle = ev.replace(/\r\n|\r|\n/g, " ");
+          const fix = esc(i.suggested_fix || "");
+          return `<tr>
+            <td>${esc(i.severity)}</td>
+            <td>${esc(i.rule_id)}</td>
+            <td><a href="${encodeURI(i.page_url)}" target="_blank" rel="noopener">${esc(i.page_url)}</a></td>
+            <td><div class="evidence-cell" title="${evTitle}">${ev}</div></td>
+            <td><div class="fix-cell">${fix}</div></td>
+            <td>${st}</td>
+          </tr>`;
+        })
+        .join("");
+
+      const wrap = document.getElementById("auditTableWrap");
+      wrap.style.display = issues.length ? "block" : "none";
+
+      const stack = results.stack || {};
+      const stackEl = document.getElementById("auditStack");
+      if (stack.label != null) {
+        stackEl.style.display = "block";
+        stackEl.innerHTML = `<strong>Detected stack:</strong> ${esc(stack.label)} <em>(${esc(stack.confidence || "")} confidence)</em>`;
+      } else {
+        stackEl.style.display = "none";
+      }
+
+      const sev = issues.reduce((a, i) => ((a[i.severity] = (a[i.severity] || 0) + 1), a), {});
+      const summary = document.getElementById("auditSummary");
+      summary.style.display = "flex";
+      summary.innerHTML = ["high", "medium", "low"]
+        .filter((k) => sev[k])
+        .map((k) => `<div class="card"><strong>${esc(k)}</strong><div>${sev[k]}</div></div>`)
+        .join("") + `<div class="card"><strong>Issues</strong><div>${issues.length}</div></div>`;
+    }
+
+    function appendActivityEvents(logElId, events) {
+      if (!logElId || !events || !events.length) return;
+      const el = document.getElementById(logElId);
+      const chunk = events
+        .map((e) => {
+          let line = (e.step || "?") + " — " + (e.state || "");
+          if (e.message) line += ": " + e.message;
+          return line;
+        })
+        .join("\n");
+      el.textContent += (el.textContent ? "\n" : "") + chunk;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    /**
+     * Start background pipeline job and poll until done.
+     * @param {{ url: string, depth: number, max_pages: number, dry_run?: boolean, apply_fixes?: boolean, repo_root?: string | null }} body
+     * @param {string | null} logElId element id for activity log pre
+     * @param {string | null} wrapElId element id for activity section (display:block when set)
+     */
+    async function postAnalyzeAsync(body, logElId, wrapElId) {
+      if (wrapElId) document.getElementById(wrapElId).style.display = "block";
+      if (logElId) document.getElementById(logElId).textContent = "";
+      const start = await fetch(api() + "/analyze/async", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      let startJson = {};
+      try {
+        startJson = await start.json();
+      } catch (_) {
+        startJson = {};
+      }
+      if (start.status !== 202) {
+        const d = startJson.detail;
+        const msg = typeof d === "string" ? d : Array.isArray(d) ? JSON.stringify(d) : JSON.stringify(startJson) || start.statusText;
+        throw new Error(msg);
+      }
+      const job_id = startJson.job_id;
+      if (!job_id) throw new Error("No job_id in response");
+      let since = 0;
+      for (;;) {
+        const pr = await fetch(api() + "/analyze/jobs/" + encodeURIComponent(job_id) + "?since=" + since);
+        if (!pr.ok) throw new Error("Poll failed: " + pr.status);
+        const data = await pr.json();
+        appendActivityEvents(logElId, data.events);
+        since = data.total_events;
+        if (data.done) {
+          document.getElementById("rawOut").textContent = JSON.stringify(data.response, null, 2);
+          const json = data.response || {};
+          const completed = json.status === "completed";
+          return { ok: completed, json };
+        }
+        await new Promise((r) => setTimeout(r, 650));
+      }
+    }
+
+    document.getElementById("formAudit").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showGlobalError("");
+      lastAuditOk = false;
+      lastAuditRequest = null;
+      setApplyEnabled();
+      clearAuditResults();
+      setAuditLoading(true);
+
+      const fd = new FormData(e.target);
+      const body = {
+        url: String(fd.get("url") || "").trim(),
+        depth: Number(fd.get("depth") ?? 1),
+        max_pages: Number(fd.get("max_pages") ?? 5),
+        dry_run: false,
+        apply_fixes: false,
+        repo_root: null,
+        repo_url: null,
+      };
+
+      document.getElementById("auditActivityWrap").style.display = "block";
+
+      let json;
+      try {
+        ({ json } = await postAnalyzeAsync(body, "auditActivityLog", null));
+      } catch (err) {
+        showGlobalError("Audit request failed: " + (err && err.message ? err.message : String(err)));
+        return;
+      } finally {
+        setAuditLoading(false);
+      }
+
+      if (json.status !== "completed") {
+        const msg = json.error?.message || json.detail || JSON.stringify(json.error || json);
+        showGlobalError("Audit failed: " + msg);
+        document.getElementById("auditTableWrap").style.display = "none";
+        document.getElementById("auditSummary").style.display = "none";
+        document.getElementById("auditStack").style.display = "none";
+        return;
+      }
+
+      lastAuditRequest = { url: body.url, depth: body.depth, max_pages: body.max_pages };
+      lastAuditOk = true;
+      renderAuditTable(json.results || {});
+      setApplyEnabled();
+    });
+
+    document.getElementById("formApply").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showGlobalError("");
+      const out = document.getElementById("applyResult");
+      out.style.display = "none";
+      out.innerHTML = "";
+
+      if (!lastAuditRequest) {
+        document.getElementById("applyActivityWrap").style.display = "none";
+        showGlobalError("Run Step 1 audit first.");
+        return;
+      }
+      const fd = new FormData(e.target);
+      const repoUrl = String(fd.get("repo_url") || "").trim();
+      if (!repoUrl) {
+        document.getElementById("applyActivityWrap").style.display = "none";
+        showGlobalError("Enter a repository URL (repo_url).");
+        return;
+      }
+
+      const body = {
+        ...lastAuditRequest,
+        dry_run: fd.get("dry_run") === "on",
+        apply_fixes: true,
+        repo_root: null,
+        repo_url: repoUrl,
+      };
+
+      setApplyLoading(true);
+      document.getElementById("applyActivityLog").textContent = "";
+      document.getElementById("applyActivityWrap").style.display = "block";
+
+      let json;
+      try {
+        ({ json } = await postAnalyzeAsync(body, "applyActivityLog", null));
+      } catch (err) {
+        out.style.display = "block";
+        out.className = "alert alert-error";
+        out.innerHTML = "<strong>Apply failed.</strong> " + esc(err && err.message ? err.message : String(err));
+        return;
+      } finally {
+        setApplyLoading(false);
+      }
+
+      out.style.display = "block";
+
+      if (json.status !== "completed") {
+        const msg = json.error?.message || json.results?.post_build?.log_tail || JSON.stringify(json.error || json);
+        out.className = "alert alert-error";
+        out.innerHTML = "<strong>Apply failed.</strong> " + esc(msg);
+        return;
+      }
+
+      const r = json.results || {};
+      const pb = r.post_build || {};
+      let html = `<div class="alert ${pb.ok ? "alert-ok" : "alert-error"}"><strong>Post-build:</strong> ${pb.ok ? "OK" : "Failed"}</div>`;
+      if (pb.log_tail) {
+        html += `<details><summary>Build log (tail)</summary><pre class="diff">${esc(pb.log_tail)}</pre></details>`;
+      }
+      if (r.files_touched && r.files_touched.length) {
+        html += "<p><strong>Files touched:</strong> " + r.files_touched.map(esc).join(", ") + "</p>";
+      }
+      if (r.backups && r.backups.length) {
+        html += "<p><strong>Backups:</strong> " + r.backups.map(esc).join(", ") + "</p>";
+      }
+      if (r.diffs && r.diffs.length) {
+        html += "<h4>Diffs</h4>" + r.diffs.map((d) => `<pre class="diff">${esc(d)}</pre>`).join("");
+      } else if (!body.dry_run) {
+        html += "<p><em>No diff output (no matching fixes or dry path).</em></p>";
+      }
+      const g = r.git || {};
+      if (g.branch || g.commit || g.commit_error || g.push || g.push_error) {
+        html += "<p><strong>Git:</strong> branch " + esc(g.branch || "test");
+        if (g.commit) html += ", commit <code>" + esc(g.commit) + "</code>";
+        if (g.commit_error) html += " <span class=\"alert-error\">commit error: " + esc(g.commit_error) + "</span>";
+        if (g.push) html += ", pushed <code>" + esc(g.push) + "</code>";
+        if (g.push_error) html += " <span class=\"alert-error\">push error: " + esc(g.push_error) + "</span>";
+        html += "</p>";
+      }
+      out.className = "";
+      out.innerHTML = html;
+      setApplyEnabled();
+    });
+
+    setApplyEnabled();
+  </script>
+</body>
+</html>
