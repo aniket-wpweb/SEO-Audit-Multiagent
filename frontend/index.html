@@ -115,15 +115,17 @@
 
   <section class="panel" aria-labelledby="step2-h">
     <h2 id="step2-h">Step 2: Fix code from Git repository</h2>
-    <p>After a successful audit, enter the <strong>clone URL</strong> of the repo to patch. The API clones into <code>.clones/&lt;run-id&gt;</code>, checks out branch <code>test</code> (from <code>origin/test</code> if it exists, otherwise creates <code>test</code> from the default branch), runs <code>code_modify</code>, then <code>npm run build</code>. Set <code>SEO_AGENT_GIT_AUTO_PUSH=1</code> in <code>.env</code> to run <code>git push -u origin test</code> after a successful local commit (off by default). Requires <code>git</code> on the server PATH and push-capable credentials for the remote.</p>
-    <p class="hint" style="margin:0.5rem 0 0;font-size:0.88rem;"><strong>Auto-fix scope:</strong> Detects <code>src/app</code> vs <code>app</code>, optional <code>pages/</code> / <code>src/pages/</code>, maps URLs to route files, then patches <code>missing_meta</code> on the resolved <code>layout.tsx</code> / <code>layout.jsx</code>. <code>duplicate_h1</code> and <code>missing_alt</code> run on the route file plus a bounded import walk and evidence substring search (so shared components can be updated). <code>broken_link</code> gets a suggested source file when the link text appears in the tree; set <code>SEO_AGENT_FIX_BROKEN_LINKS=1</code> in <code>.env</code> for optional conservative internal <code>href</code> replacement (off by default).</p>
+    <p>Enter the <strong>Git clone URL</strong> for the site you audited. The API clones into <code>.clones/&lt;run-id&gt;</code>, checks out branch <code>seo-fixes</code> (or <code>SEO_AGENT_GIT_BRANCH</code>), runs <code>seo_fix</code> (rules + optional OpenAI via <code>SEO_FIX_API_KEY</code>), verifies with <code>npm run build</code> when the repo is Node, then <strong>commits</strong> locally. Set <code>SEO_AGENT_GIT_AUTO_PUSH=1</code> to push. Requires <code>git</code> on PATH and push credentials for private remotes.</p>
+    <p class="hint" style="margin:0.5rem 0 0;font-size:0.88rem;"><strong>Note:</strong> The audit crawls the live URL; fixes apply to the clone. Redeploy from the patched branch for the crawl to reflect changes.</p>
     <form id="formApply">
       <label>Repository URL (<code>repo_url</code>)
         <input name="repo_url" type="text" size="60" placeholder="https://github.com/org/repo.git" autocomplete="off" />
-        <span class="hint" style="margin-top:0.35rem;">HTTPS, <code>ssh://</code>, or <code>git@host:path</code>. For legacy local folders only, use the API field <code>repo_root</code> with <code>SEO_AGENT_REPO_ALLOWLIST</code> instead (not exposed in this UI).</span>
+        <span class="hint" style="margin-top:0.35rem;">HTTPS, <code>ssh://</code>, or <code>git@host:path</code>.</span>
       </label>
       <div class="apply-extra">
-        <label><input type="checkbox" name="dry_run" id="chkDryRun" /> <strong>Dry run</strong> — no file writes; the <code>code_modify</code> step is <strong>skipped</strong>. Leave <strong>unchecked</strong> to apply real fixes.</label>
+        <label><input type="checkbox" name="dry_run" id="chkDryRun" /> <strong>Dry run</strong> — no clone writes; <code>seo_fix</code> is <strong>skipped</strong>. Leave <strong>unchecked</strong> to apply real fixes.</label>
+        <label style="margin-top:0.5rem;"><input type="checkbox" name="reaudit_after_apply" id="chkReaudit" /> <strong>Re-audit after apply</strong> — second crawl of the same URL after a successful build (see <code>issues_after_apply</code> in results). The live site must be rebuilt from the clone for counts to change.</label>
+        <label style="margin-top:0.35rem;"><input type="checkbox" name="llm_apply_review" id="chkLlmReview" /> <strong>LLM apply review</strong> — ask Ollama for a short JSON summary after apply (requires Ollama; or set <code>SEO_AGENT_LLM_APPLY_REVIEW=1</code> in <code>.env</code>).</label>
       </div>
       <button type="submit" class="primary" id="btnApply" disabled>Apply fixes</button>
       <div id="applyProgressWrap" class="audit-progress-wrap" style="display:none;" aria-live="polite">
@@ -330,7 +332,6 @@
         max_pages: Number(fd.get("max_pages") ?? 5),
         dry_run: false,
         apply_fixes: false,
-        repo_root: null,
         repo_url: null,
       };
 
@@ -385,8 +386,9 @@
         ...lastAuditRequest,
         dry_run: fd.get("dry_run") === "on",
         apply_fixes: true,
-        repo_root: null,
         repo_url: repoUrl,
+        reaudit_after_apply: fd.get("reaudit_after_apply") === "on",
+        llm_apply_review: fd.get("llm_apply_review") === "on",
       };
 
       setApplyLoading(true);
@@ -416,9 +418,22 @@
 
       const r = json.results || {};
       const pb = r.post_build || {};
+      const sum = r.apply_summary || {};
+      const issueN = Array.isArray(r.issues) ? r.issues.length : 0;
+      const afterN = Array.isArray(r.issues_after_apply) ? r.issues_after_apply.length : null;
       let html = `<div class="alert ${pb.ok ? "alert-ok" : "alert-error"}"><strong>Post-build:</strong> ${pb.ok ? "OK" : "Failed"}</div>`;
       if (pb.log_tail) {
         html += `<details><summary>Build log (tail)</summary><pre class="diff">${esc(pb.log_tail)}</pre></details>`;
+      }
+      if (sum.pre_fix_issue_count != null || issueN) {
+        html += `<p style="margin:0.5rem 0 0;font-size:0.9rem;"><strong>Pre-fix audit issues (table):</strong> ${sum.pre_fix_issue_count != null ? esc(String(sum.pre_fix_issue_count)) : esc(String(issueN))}`;
+        if (afterN !== null) {
+          html += ` &nbsp;|&nbsp; <strong>After re-audit crawl:</strong> ${esc(String(afterN))}`;
+        }
+        html += "</p>";
+      }
+      if (sum.human_note) {
+        html += `<div class="alert" style="margin-top:0.5rem;background:rgba(37,99,235,0.08);border-color:#93c5fd;color:#1e3a5f;"><strong>Apply summary:</strong> ${esc(sum.human_note)}</div>`;
       }
       if (r.files_touched && r.files_touched.length) {
         html += "<p><strong>Files touched:</strong> " + r.files_touched.map(esc).join(", ") + "</p>";
@@ -429,8 +444,18 @@
       if (r.diffs && r.diffs.length) {
         html += "<h4>Diffs</h4>" + r.diffs.map((d) => `<pre class="diff">${esc(d)}</pre>`).join("");
       } else if (!body.dry_run) {
-        html += "<p><em>No diff output (no matching fixes or dry path).</em></p>";
+        if (sum.apply_attempted && issueN > 0) {
+          html += "<p><em>No file diffs were written.</em> The message above explains why this can happen even when the audit lists issues.</p>";
+        } else if (issueN === 0) {
+          html += "<p><em>No diff output — nothing to change for the reported audit.</em></p>";
+        } else {
+          html += "<p><em>No diff output — audit-only or modify was skipped.</em></p>";
+        }
       }
+      if (r.llm_apply_review && Object.keys(r.llm_apply_review).length) {
+        html += `<details style="margin-top:0.75rem;"><summary>LLM apply review</summary><pre class="diff">${esc(JSON.stringify(r.llm_apply_review, null, 2))}</pre></details>`;
+      }
+      html += `<details style="margin-top:0.5rem;"><summary>Raw apply_summary (debug)</summary><pre class="diff">${esc(JSON.stringify(sum, null, 2))}</pre></details>`;
       const g = r.git || {};
       if (g.branch || g.commit || g.commit_error || g.push || g.push_error) {
         html += "<p><strong>Git:</strong> branch " + esc(g.branch || "test");

@@ -15,6 +15,7 @@ def test_progress_sink_pre_validation_and_steps(monkeypatch: pytest.MonkeyPatch)
 
     reg = ToolRegistry()
     reg.register("noop", lambda ctx: None)
+    reg.register("format_results", lambda ctx: None)
 
     sink: list = []
     ctx = RunContext(request=AnalyzeRequest(url="http://example.com", depth=0, max_pages=1))

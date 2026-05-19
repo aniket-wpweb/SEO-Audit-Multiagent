@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
 
 from app.orchestrator.context import Issue, RunContext
+from app.services.path_aliases import resolve_alias_spec
 from app.services.repo_layout import (
     RepoLayout,
     analyze_repo_layout,
@@ -18,6 +19,9 @@ from app.validators.pre_exec import same_origin
 
 _REL_IMPORT_RE = re.compile(
     r"""from\s+['"](\.\.?/[^'"]+)['"]|import\s*\(\s*['"](\.\.?/[^'"]+)['"]\s*\)""",
+)
+_ALIAS_IMPORT_RE = re.compile(
+    r"""from\s+['"]([^'"]+)['"]|import\s+[\w$]+\s+from\s+['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)""",
 )
 
 
@@ -49,6 +53,24 @@ def _href_to_path_for_mapping(page_url: str, href: str) -> str | None:
     return path if path else "/"
 
 
+def _append_next_image_needles(value: str, out: list[str]) -> None:
+    """Decode ``/_next/image?url=...`` into source asset paths for grep."""
+    if "/_next/image" not in value and "url=" not in value:
+        return
+    for m in re.finditer(r"url=([^&\s\"']+)", value):
+        raw = m.group(1).strip()
+        if not raw:
+            continue
+        decoded = unquote(raw)
+        if len(decoded) >= 4:
+            out.append(decoded)
+        parts = [p for p in decoded.split("/") if p]
+        if len(parts) >= 2:
+            parent = "/" + "/".join(parts[:-1]) + "/"
+            if len(parent) >= 4:
+                out.append(parent)
+
+
 def _evidence_substrings_for_grep(evidence: str) -> list[str]:
     """Pull a few stable substrings from audit evidence (img src, long paths)."""
     out: list[str] = []
@@ -56,22 +78,25 @@ def _evidence_substrings_for_grep(evidence: str) -> list[str]:
         s = m.group(1).strip()
         if len(s) >= 8:
             out.append(s)
+        _append_next_image_needles(s, out)
     for m in re.finditer(r"url=([^&\s\"']+)", evidence):
         s = m.group(1).strip()
         if len(s) >= 8:
             out.append(s)
+        _append_next_image_needles(s, out)
     if len(evidence) >= 12 and "<" in evidence:
         chunk = evidence.strip()
         if len(chunk) > 200:
             chunk = chunk[:200]
         out.append(chunk)
+        _append_next_image_needles(chunk, out)
     seen: set[str] = set()
     dedup: list[str] = []
     for s in out:
         if s not in seen:
             seen.add(s)
             dedup.append(s)
-    return dedup[:5]
+    return dedup[:8]
 
 
 def grep_repo_for_substring(
@@ -111,7 +136,7 @@ def grep_repo_for_substring(
     return hits
 
 
-def _resolve_import_to_file(repo: Path, from_file: Path, spec: str) -> Path | None:
+def _resolve_relative_import(repo: Path, from_file: Path, spec: str) -> Path | None:
     root = repo.resolve()
     if "/node_modules/" in spec or "node_modules" in spec:
         return None
@@ -132,6 +157,37 @@ def _resolve_import_to_file(repo: Path, from_file: Path, spec: str) -> Path | No
             if t.is_file():
                 return t
     return None
+
+
+def resolve_module_spec(repo: Path, from_file: Path, spec: str) -> Path | None:
+    """Resolve relative (``./``) or tsconfig alias (``@/``) import to a file under ``repo``."""
+    spec = spec.strip()
+    if not spec or "{" in spec or "*" in spec:
+        return None
+    if spec.startswith(("./", "../")):
+        return _resolve_relative_import(repo, from_file, spec)
+    if spec.startswith("@") or not spec.startswith("."):
+        rel = resolve_alias_spec(repo, spec)
+        if rel:
+            p = join_posix_rel(repo, rel)
+            if p.is_file():
+                return p
+    return None
+
+
+def _import_specs_from_source(text: str) -> list[str]:
+    specs: list[str] = []
+    for m in _REL_IMPORT_RE.finditer(text):
+        s = (m.group(1) or m.group(2) or "").strip()
+        if s:
+            specs.append(s)
+    for m in _ALIAS_IMPORT_RE.finditer(text):
+        s = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+        if not s or s.startswith((".", "/")):
+            continue
+        if s.startswith("@") or "/" in s:
+            specs.append(s)
+    return specs
 
 
 def collect_import_neighbors(
@@ -163,11 +219,8 @@ def collect_import_neighbors(
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        for m in _REL_IMPORT_RE.finditer(text):
-            spec = (m.group(1) or m.group(2) or "").strip()
-            if not spec or "{" in spec or "*" in spec:
-                continue
-            resolved = _resolve_import_to_file(repo, path, spec)
+        for spec in _import_specs_from_source(text):
+            resolved = resolve_module_spec(repo, path, spec)
             if resolved is None:
                 continue
             rrel = str(resolved.relative_to(root)).replace("\\", "/")

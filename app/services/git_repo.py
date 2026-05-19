@@ -1,21 +1,26 @@
-"""Clone remote Git repositories and work on the ``test`` branch (workshop apply flow)."""
+"""Clone remote Git repositories, apply fixes on a working branch, commit and push."""
 
 from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
+from app.services.subprocess_cmd import run_cmd
+
 
 def _seo_agent_root() -> Path:
-    """seo-agent/ directory (parent of app/)."""
     return Path(__file__).resolve().parent.parent.parent
 
 
+def default_git_branch(request_branch: str | None = None) -> str:
+    if request_branch and request_branch.strip():
+        return request_branch.strip()
+    return os.environ.get("SEO_AGENT_GIT_BRANCH", "seo-fixes").strip() or "seo-fixes"
+
+
 def clone_base_dir() -> Path:
-    """Directory under which per-run clone folders are created."""
     raw = os.environ.get("SEO_AGENT_CLONE_ROOT", ".clones").strip() or ".clones"
     p = Path(raw)
     base = p.resolve() if p.is_absolute() else (_seo_agent_root() / p).resolve()
@@ -24,7 +29,6 @@ def clone_base_dir() -> Path:
 
 
 def assert_clone_destination_allowed(dest: Path, run_id: str) -> Path:
-    """Ensure dest is exactly ``clone_base_dir() / run_id`` (prevents path escape)."""
     expected = (clone_base_dir() / run_id).resolve()
     resolved = dest.resolve()
     if resolved != expected:
@@ -33,7 +37,6 @@ def assert_clone_destination_allowed(dest: Path, run_id: str) -> Path:
 
 
 def validate_repo_url(raw: str) -> str:
-    """Return stripped URL; raise ValueError if not an allowed Git remote form."""
     s = raw.strip()
     if not s:
         raise ValueError("repo_url is empty")
@@ -53,108 +56,93 @@ def validate_repo_url(raw: str) -> str:
 
 
 def ensure_git_on_path() -> None:
-    r = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10)
+    try:
+        r = run_cmd(["git", "--version"], timeout=10)
+    except FileNotFoundError as exc:
+        raise RuntimeError("git is not available on PATH") from exc
     if r.returncode != 0:
         raise RuntimeError("git is not available on PATH")
 
 
-def clone_and_checkout_test(repo_url: str, dest: Path) -> None:
-    """
-    Fresh clone into ``dest`` (must not exist as a repo target), then checkout ``test``:
-    use ``origin/test`` if present after fetch, else existing ``test``, else create ``test``.
-    """
+def clone_and_checkout_branch(repo_url: str, dest: Path, branch: str) -> None:
+    """Fresh clone, then checkout ``branch`` from origin or create it."""
     ensure_git_on_path()
+    branch = branch.strip()
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    cp = subprocess.run(
+    cp = run_cmd(
         ["git", "clone", repo_url, str(dest)],
-        capture_output=True,
-        text=True,
         timeout=int(os.environ.get("SEO_AGENT_GIT_CLONE_TIMEOUT_SEC", "600")),
     )
     if cp.returncode != 0:
         msg = (cp.stderr or cp.stdout or "unknown error")[:1200]
         raise RuntimeError(f"git clone failed: {msg}")
 
-    subprocess.run(
+    run_cmd(
         ["git", "fetch", "origin"],
         cwd=str(dest),
-        capture_output=True,
-        text=True,
         timeout=int(os.environ.get("SEO_AGENT_GIT_FETCH_TIMEOUT_SEC", "300")),
     )
 
-    remote_test = subprocess.run(
-        ["git", "rev-parse", "--verify", "origin/test"],
+    remote_ref = run_cmd(
+        ["git", "rev-parse", "--verify", f"origin/{branch}"],
         cwd=str(dest),
-        capture_output=True,
-        text=True,
         timeout=60,
     )
-    if remote_test.returncode == 0:
-        checkout = subprocess.run(
-            ["git", "checkout", "-B", "test", "origin/test"],
+    if remote_ref.returncode == 0:
+        checkout = run_cmd(
+            ["git", "checkout", "-B", branch, f"origin/{branch}"],
             cwd=str(dest),
-            capture_output=True,
-            text=True,
             timeout=120,
         )
     else:
-        local_test = subprocess.run(
-            ["git", "rev-parse", "--verify", "test"],
+        local_ref = run_cmd(
+            ["git", "rev-parse", "--verify", branch],
             cwd=str(dest),
-            capture_output=True,
-            text=True,
             timeout=60,
         )
-        if local_test.returncode == 0:
-            checkout = subprocess.run(
-                ["git", "checkout", "test"],
+        if local_ref.returncode == 0:
+            checkout = run_cmd(
+                ["git", "checkout", branch],
                 cwd=str(dest),
-                capture_output=True,
-                text=True,
                 timeout=120,
             )
         else:
-            checkout = subprocess.run(
-                ["git", "checkout", "-b", "test"],
+            checkout = run_cmd(
+                ["git", "checkout", "-b", branch],
                 cwd=str(dest),
-                capture_output=True,
-                text=True,
                 timeout=120,
             )
     if checkout.returncode != 0:
         msg = (checkout.stderr or checkout.stdout or "unknown error")[:1200]
-        raise RuntimeError(f"git checkout test failed: {msg}")
+        raise RuntimeError(f"git checkout {branch} failed: {msg}")
 
 
-def try_commit_automated_fixes(repo: Path) -> tuple[str | None, str | None]:
-    """
-    If there are unstaged/staged changes, ``git add -A`` and commit.
-    Returns (rev_parse_short_sha_or_None, error_message_or_None).
-    """
+def clone_and_checkout_test(repo_url: str, dest: Path) -> None:
+    """Backward-compatible alias."""
+    clone_and_checkout_branch(repo_url, dest, "test")
+
+
+def try_commit_automated_fixes(repo: Path, branch: str | None = None) -> tuple[str | None, str | None]:
     ensure_git_on_path()
-    st = subprocess.run(
+    br = branch or default_git_branch()
+    st = run_cmd(
         ["git", "status", "--porcelain"],
         cwd=str(repo),
-        capture_output=True,
-        text=True,
         timeout=60,
     )
     if st.returncode != 0:
         return None, (st.stderr or st.stdout or "git status failed")[:500]
     if not st.stdout.strip():
         return None, None
-    add = subprocess.run(["git", "add", "-A"], cwd=str(repo), capture_output=True, text=True, timeout=120)
+    add = run_cmd(["git", "add", "-A"], cwd=str(repo), timeout=120)
     if add.returncode != 0:
         return None, (add.stderr or add.stdout or "git add failed")[:500]
-    msg = "seo-agent: automated fixes on test branch"
-    cm = subprocess.run(
+    msg = f"seo-agent: automated SEO fixes on {br}"
+    cm = run_cmd(
         ["git", "commit", "-m", msg],
         cwd=str(repo),
-        capture_output=True,
-        text=True,
         timeout=120,
     )
     out = (cm.stdout or "") + (cm.stderr or "")
@@ -162,31 +150,27 @@ def try_commit_automated_fixes(repo: Path) -> tuple[str | None, str | None]:
         return None, None
     if cm.returncode != 0:
         return None, out[:800]
-    rev = subprocess.run(
+    rev = run_cmd(
         ["git", "rev-parse", "--short", "HEAD"],
         cwd=str(repo),
-        capture_output=True,
-        text=True,
         timeout=30,
     )
     sha = rev.stdout.strip() if rev.returncode == 0 else None
     return sha, None
 
 
-def try_push_origin_test(repo: Path) -> tuple[bool, str | None]:
-    """
-    Run ``git push -u origin test`` from ``repo``.
-    Returns (success, error_message_or_None). Requires credentials (SSH, credential helper, or token URL).
-    """
+def try_push_origin_branch(repo: Path, branch: str | None = None) -> tuple[bool, str | None]:
+    br = branch or default_git_branch()
     ensure_git_on_path()
-    p = subprocess.run(
-        ["git", "push", "-u", "origin", "test"],
+    p = run_cmd(
+        ["git", "push", "-u", "origin", br],
         cwd=str(repo),
-        capture_output=True,
-        text=True,
         timeout=int(os.environ.get("SEO_AGENT_GIT_PUSH_TIMEOUT_SEC", "300")),
     )
     if p.returncode != 0:
-        msg = (p.stderr or p.stdout or "git push failed")[:2000]
-        return False, msg
+        return False, (p.stderr or p.stdout or "git push failed")[:2000]
     return True, None
+
+
+def try_push_origin_test(repo: Path) -> tuple[bool, str | None]:
+    return try_push_origin_branch(repo, "test")

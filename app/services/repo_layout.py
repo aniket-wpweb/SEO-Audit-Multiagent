@@ -18,6 +18,7 @@ class RepoLayout:
 
     app_dir: str | None  # e.g. "app" or "src/app"
     pages_dir: str | None  # e.g. "pages" or "src/pages"
+    components_dir: str | None  # e.g. "src/components" or "components"
 
 
 def analyze_repo_layout(repo: Path) -> RepoLayout:
@@ -32,7 +33,12 @@ def analyze_repo_layout(repo: Path) -> RepoLayout:
         if join_posix_rel(root, rel).is_dir():
             pages_dir = rel
             break
-    return RepoLayout(app_dir=app_dir, pages_dir=pages_dir)
+    components_dir = None
+    for rel in ("src/components", "components"):
+        if join_posix_rel(root, rel).is_dir():
+            components_dir = rel
+            break
+    return RepoLayout(app_dir=app_dir, pages_dir=pages_dir, components_dir=components_dir)
 
 
 def _path_segments_from_url(page_url: str) -> list[str]:
@@ -140,4 +146,6 @@ def scan_roots_for_grep(layout: RepoLayout) -> list[str]:
         roots.append(layout.app_dir)
     if layout.pages_dir:
         roots.append(layout.pages_dir)
+    if layout.components_dir and layout.components_dir not in roots:
+        roots.append(layout.components_dir)
     return roots

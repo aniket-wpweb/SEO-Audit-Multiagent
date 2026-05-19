@@ -90,11 +90,11 @@ def test_try_push_origin_test_success(monkeypatch: pytest.MonkeyPatch, tmp_path)
         recorded.append(list(cmd))
         return R()
 
-    monkeypatch.setattr("app.services.git_repo.subprocess.run", fake_run)
+    monkeypatch.setattr("app.services.git_repo.run_cmd", fake_run)
     ok, err = try_push_origin_test(tmp_path)
     assert ok is True
     assert err is None
-    assert recorded == [["git", "push", "-u", "origin", "test"]]
+    assert recorded and recorded[0][1:] == ["push", "-u", "origin", "test"]
 
 
 def test_try_push_origin_test_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -108,7 +108,7 @@ def test_try_push_origin_test_failure(monkeypatch: pytest.MonkeyPatch, tmp_path)
 
         return R()
 
-    monkeypatch.setattr("app.services.git_repo.subprocess.run", fake_run)
+    monkeypatch.setattr("app.services.git_repo.run_cmd", fake_run)
     ok, err = try_push_origin_test(tmp_path)
     assert ok is False
     assert err and "auth" in err
